@@ -1,0 +1,29 @@
+name: Alert Finance
+
+on:
+  workflow_dispatch:  # Permette di avviarlo manualmente dalla UI di GitHub
+
+jobs:
+  send-report:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Installa dipendenze
+        run: |
+          pip install yfinance python-dotenv requests firebase-admin
+
+      - name: Esegui lo script
+        env:
+          TELEGRAM_BOT: ${{ secrets.TELEGRAM_BOT }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FIREBASE_CREDENTIALS_JSON: ${{ secrets.FIREBASE_CREDENTIALS_JSON }}
+        run: |
+          python stock_alert.py
