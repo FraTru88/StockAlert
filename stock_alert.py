@@ -24,15 +24,14 @@ Struttura Firestore di esempio (collection "alerts", un documento per alert):
     below_notified: false
 """
 
-import json
 import logging
 import os
 
-import firebase_admin
 import requests
 import yfinance as yf
 from dotenv import load_dotenv
-from firebase_admin import credentials, firestore
+from firestore_client import init_firestore, get_collection, close_firestore
+from telegram_client import send_message
 
 load_dotenv()
 
@@ -40,6 +39,7 @@ TELEGRAM_BOT = os.getenv("TELEGRAM_BOT")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 FIREBASE_CREDENTIALS = os.getenv("FIREBASE_CREDENTIALS")
 FIREBASE_CREDENTIALS_JSON = os.getenv("FIREBASE_CREDENTIALS_JSON")
+
 ALERTS_COLLECTION = "alerts"
 
 logging.basicConfig(
@@ -56,30 +56,13 @@ log = logging.getLogger(__name__)
 
 session = requests.Session()
 
-
-# ── Firestore ─────────────────────────────────────────────────────────────────
-def init_firestore():
-    if FIREBASE_CREDENTIALS_JSON:
-        cred = credentials.Certificate(json.loads(FIREBASE_CREDENTIALS_JSON))
-    elif FIREBASE_CREDENTIALS:
-        cred = credentials.Certificate(FIREBASE_CREDENTIALS)
-    else:
-        raise RuntimeError(
-            "Imposta FIREBASE_CREDENTIALS (percorso) o FIREBASE_CREDENTIALS_JSON (contenuto)."
-        )
-    firebase_admin.initialize_app(cred)
-    return firestore.client()
-
-
 def load_alerts(db) -> list[tuple[object, dict]]:
     """Restituisce (riferimento documento, dati) per gli alert attivi."""
-    alerts = []
-    for doc in db.collection(ALERTS_COLLECTION).stream():
-        data = doc.to_dict()
+    alerts = []    
+    for ref, data in get_collection(db, ALERTS_COLLECTION):
         if data.get("active", True) and data.get("ticker"):
-            alerts.append((doc.reference, data))
+            alerts.append((ref, data))
     return alerts
-
 
 # ── Prezzo ────────────────────────────────────────────────────────────────────
 def get_price(ticker: str) -> float | None:
@@ -93,24 +76,9 @@ def get_price(ticker: str) -> float | None:
         log.error("Errore recupero prezzo %s: %s", ticker, e)
         return None
 
-
 # ── Telegram ──────────────────────────────────────────────────────────────────
-def send_telegram(message: str) -> bool:
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT}/sendMessage"
-    try:
-        r = session.post(
-            url,
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": message},
-            timeout=10,
-        )
-        r.raise_for_status()
-    except requests.RequestException as e:
-        # niente str(e): contiene l'URL con il token
-        log.error("Invio Telegram fallito: %s", type(e).__name__)
-        return False
-    log.info("Notifica inviata al bot Telegram")
-    return True
-
+def send_telegram(message: str) -> bool:    
+    return send_message(message)
 
 # ── Logica alert ──────────────────────────────────────────────────────────────
 def check_alerts(db):
@@ -134,43 +102,45 @@ def check_alerts(db):
         updates = {}
 
         if above is not None:
-            hit = price >= above
-            if hit and not alert.get("above_notified"):
-                msg = (
-                    f"🚀 {name} ({ticker}) ha SUPERATO la soglia!\n"
-                    f"   Prezzo attuale: {price} {currency}\n"
-                    f"   Soglia superiore: {above} {currency}"
-                )
-                if send_telegram(msg):
-                    updates["above_notified"] = True
-            elif not hit and alert.get("above_notified"):
-                updates["above_notified"] = False  # riarma l'alert
+            process_threshold(
+                price >= above, alert, "above_notified",
+                f"🚀 {name} ({ticker}) ha SUPERATO la soglia!\n"
+                f"   Prezzo attuale: {price} {currency}\n"
+                f"   Soglia superiore: {above} {currency}",
+                updates,
+            )
 
         if below is not None:
-            hit = price <= below
-            if hit and not alert.get("below_notified"):
-                msg = (
-                    f"🔻 {name} ({ticker}) è SCESO sotto la soglia!\n"
-                    f"   Prezzo attuale: {price} {currency}\n"
-                    f"   Soglia inferiore: {below} {currency}"
-                )
-                if send_telegram(msg):
-                    updates["below_notified"] = True
-            elif not hit and alert.get("below_notified"):
-                updates["below_notified"] = False
+            process_threshold(
+                price <= below, alert, "below_notified",
+                f"🔻 {name} ({ticker}) è SCESO sotto la soglia!\n"
+                f"   Prezzo attuale: {price} {currency}\n"
+                f"   Soglia inferiore: {below} {currency}",
+                updates,
+            )
 
         if updates:
             ref.update(updates)
 
     log.info("Controllo completato.")
 
+def process_threshold(hit: bool, alert: dict, flag: str, msg: str, updates: dict) -> None:
+    """Invia la notifica al primo superamento e riarma l'alert quando rientra."""
+    notified = alert.get(flag)
+    if hit and not notified:
+        if send_telegram(msg):
+            updates[flag] = True
+    elif not hit and notified:
+        updates[flag] = False
 
 def main():
     log.info("=== Stock Alert App avviata ===")
     if not TELEGRAM_BOT or not TELEGRAM_CHAT_ID:
         raise RuntimeError("TELEGRAM_BOT / TELEGRAM_CHAT_ID non configurati.")
-    check_alerts(init_firestore())
-
+    try:
+        check_alerts(init_firestore())
+    finally:
+        close_firestore()
 
 if __name__ == "__main__":
     main()

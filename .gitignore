@@ -1,3 +1,4 @@
 .env
 serviceAccount.json
 *.log
+__pycache__
